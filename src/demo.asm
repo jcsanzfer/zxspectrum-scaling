@@ -15,12 +15,19 @@ entry:
     out (c),a
     ld hl,$c000
     call initialize_screen
+    IFDEF CACHED
+    call prepare_cache
+    ENDIF
     ei
 frame:
+    IFDEF CACHED
+    call draw_cached
+    ELSE
     call select_plan
     call select_draw_screen
     call clear_box
     call render
+    ENDIF
 frame_done:
     di                        ; EI/HALT below avoids a flip-before-HALT race
     ld a,1
@@ -126,6 +133,9 @@ screen_addr:
 select_plan:
     ld a,(size)
     sub 16
+    IFDEF CACHED
+    srl a
+    ENDIF
     ld l,a
     ld h,0
     ld e,l
@@ -157,6 +167,12 @@ select_plan:
 
 ; Plan: width in bytes, N source-row numbers, then horizontal byte groups.
 render:
+    IFDEF CACHED
+    ld hl,frame_buffer+1
+    ld (buffer_cursor),hl
+    ld a,(plan)
+    ld (frame_buffer),a
+    ENDIF
     ld a,255
     ld (previous_source),a
     ld a,(plan)
@@ -248,6 +264,9 @@ low_nibble:
     ld (bytes_left),a
     jr nz,render_byte
 copy_row:
+    IFDEF CACHED
+    ld de,(buffer_cursor)
+    ELSE
     ld a,(screen_y)
     call screen_addr
     ld a,(x_byte)
@@ -255,11 +274,15 @@ copy_row:
     ld d,0
     add hl,de
     ex de,hl
+    ENDIF
     ld hl,row_cache
     ld a,(width)
     ld c,a
     ld b,0
     ldir
+    IFDEF CACHED
+    ld (buffer_cursor),de
+    ENDIF
     ld a,(screen_y)
     inc a
     ld (screen_y),a
@@ -273,7 +296,11 @@ size:           db 16
 visible_screen: db 0           ; bit 3 of $7ffd, mirrored across ALL paging
 screen_base:    db $c0
 flip_pending:   db 0
+    IFDEF CACHED
+direction:      db 2
+    ELSE
 direction:      db 1
+    ENDIF
 width:          db 0
 x_byte:         db 0
 screen_y:       db 0
@@ -284,7 +311,12 @@ horizontal:    dw 0
 destination:   dw 0
 previous_source: db 255
 row_cache:     ds 16
+    IFDEF CACHED
+    INCLUDE "cache.asm"
+directory:     INCBIN "build/cached/directory.bin"
+    ELSE
 directory:     INCBIN "build/directory.bin"
+    ENDIF
 sprite:        INCBIN "build/sprite.bin"
     ALIGN 256
 plan:          ds 1024
@@ -313,4 +345,8 @@ interrupt_end:
     ASSERT $ < $be00
     ORG $be00
     ds 257,$bd                ; any ULA interrupt vector -> $bdbd
+    IFDEF CACHED
+    SAVEBIN "build/cached/main.bin",$8000,$bf01-$8000
+    ELSE
     SAVEBIN "build/main.bin",$8000,$bf01-$8000
+    ENDIF

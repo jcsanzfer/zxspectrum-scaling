@@ -1,16 +1,18 @@
 """Execute the assembled Z80, not a Python copy of the renderer."""
 import json
+import os
 import random
 import struct
 from pathlib import Path
 
 import z80
 
-BUILD = Path(__file__).resolve().parents[1] / 'build'
+BUILD = Path(os.environ.get('ZX_BUILD', Path(__file__).resolve().parents[1] / 'build'))
 SYMBOLS = {line.split(':')[0]: int(line.split()[-1], 16)
            for line in (BUILD/'main.sym').read_text().splitlines()}
 PLANS = json.loads((BUILD/'plans.json').read_text())
-PAGES = {b: (BUILD/f'bank{b}.bin').read_bytes() for b in (0, 1, 3, 4)}
+BANKS = (0, 1, 3, 4, 6) if BUILD.name == 'cached' else (0, 1, 3, 4)
+PAGES = {b: (BUILD/f'bank{b}.bin').read_bytes() for b in BANKS}
 CODE = (BUILD/'main.bin').read_bytes()
 CPU_HZ = 3546900
 
@@ -94,11 +96,11 @@ def run_to(m, end, budget=5_000_000, interrupts=False):
     return budget - m.ticks_to_stop
 
 
-def call(m, name):
+def call(m, name, budget=5_000_000):
     m.sp = 0xbfee
     m.set_memory_block(m.sp, struct.pack('<H', 0x7fff))
     m.pc = SYMBOLS[name]
-    return run_to(m, 0x7fff)
+    return run_to(m, 0x7fff, budget=budget)
 
 
 def expected(sprite, n):
@@ -129,9 +131,9 @@ def verify_tape():
             checksum ^= byte
         assert checksum == 0
         blocks.append(block)
-    assert len(blocks) == 12
+    assert len(blocks) == 4+2*len(PAGES)
     assert blocks[3][1:-1] == CODE
-    for i, bank in enumerate((0, 1, 3, 4)):
+    for i, bank in enumerate(sorted(PAGES)):
         assert blocks[5+2*i][1:-1] == PAGES[bank]
     assert len((BUILD/'scaling.sna').read_bytes()) == 131103
 

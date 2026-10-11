@@ -1,17 +1,24 @@
 # Scaling monocromo en ZX Spectrum 128K
 
-Prueba técnica de escalado por tablas sobre **un único sprite de 64×64**
-(512 bytes). La demo Z80 aumenta y reduce su tamaño entre **16×16 y
-128×128**, de píxel en píxel. No hay versiones prerenderizadas del sprite.
+Prueba técnica con **un único sprite original de 64×64, 512 bytes**.
+Se incluyen dos variantes para comparar CPU y memoria:
+
+- **Caché, demo principal:** el Z80 genera 57 tamaños al arrancar, de
+  16×16 a 128×128 en pasos de dos píxeles. La animación copia las imágenes
+  a la pantalla oculta, sin volver a ejecutar el escalador.
+- **Tiempo real, referencia:** conserva los 113 tamaños originales, con
+  pasos de un píxel y consultas de tablas en cada dibujo.
 
 ## Ejecutar
 
 Para probar la demo sin instalar herramientas, clona el repositorio y abre
 `demo/scaling.sna` en un emulador compatible con snapshots de Spectrum
-128K. `demo/scaling.tap` contiene la misma versión en formato cinta.
-Estos archivos son la compilación validada que acompaña al código fuente.
+128K. Espera unos segundos con pantalla negra: el propio Z80 está preparando
+la caché. `demo/scaling.tap` contiene la misma versión en cinta. Para comparar
+con la versión anterior, abre `demo/realtime.sna` o carga `demo/realtime.tap`.
+Estos archivos son las compilaciones validadas que acompañan al código fuente.
 
-En el entorno de desarrollo, con Python 3.12+, Git, Make y un compilador C++17:
+En el entorno cloud, con Python 3.12+, Git, Make y un compilador C++17:
 
 ```sh
 bash tools/setup.sh
@@ -24,7 +31,15 @@ pruebas en `.venv`, compila y valida. Después:
 make test PYTHON=.venv/bin/python SJASMPLUS=/workspace/tooling/sjasmplus/sjasmplus
 ```
 
-Los resultados están en `build/`:
+En otro ordenador, con SjASMPlus 1.24.0 instalado:
+
+```sh
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements-dev.txt
+make test PYTHON=.venv/bin/python SJASMPLUS=sjasmplus
+```
+
+La versión principal se genera en `build/cached/`; la referencia en `build/`:
 
 - `scaling.sna`: snapshot **128K**; abrir con un emulador de Spectrum que
   admita este formato, por ejemplo Fuse o una versión compatible de ZEsarUX.
@@ -33,11 +48,18 @@ Los resultados están en `build/`:
   un Spectrum 48K; una ROM 48K sobre hardware 128K sí tiene la RAM necesaria.
 - `timings.json`: medidas de las 113 escalas ejecutando el Z80 ensamblado.
 
+En `build/cached/timings.json` se guardan las medidas de las 57 escalas
+con caché y el coste de preparación. Ambas variantes se compilan y prueban
+con `make test`.
+
 La animación es automática y el borde permanece negro. No hay controles
 ni juego. Se dibuja en la pantalla oculta y se intercambia con la visible
 al llegar la interrupción vertical, una vez terminado el dibujo.
 
 ## Cómo funcionan las tablas
+
+Esta sección describe el núcleo compartido y las medidas de la variante
+en tiempo real. La preparación de caché usa el mismo núcleo.
 
 Para cada tamaño N se calcula una correspondencia de centros de píxel:
 
@@ -73,7 +95,74 @@ sprite en `LD A,(IX+d)`. Por tanto debe ejecutarse en RAM y no es reentrante;
 la interrupción IM2 privada preserva AF y BC, intercambia pantallas cuando
 hay un cuadro pendiente, habilita interrupciones y retorna.
 
+## Caché generada al arrancar
+
+`src/cached.asm` activa la variante con caché y `src/cache.asm` implementa
+preparación, copia y borrado de bordes. El Z80 prepara todas las imágenes
+desde el único sprite antes de comenzar la animación. **Python no genera
+los sprites escalados**: el snapshot y la cinta contienen vacíos los bancos
+reservados para ellos.
+
+Los 57 planes ocupan **27.421 bytes** en los bancos 0 y 1. Las imágenes
+resultantes ocupan **48.784 bytes**, incluyendo cabecera de ancho, relleno
+para centrado y alineación a bloques de 16 bytes. Se empaquetan sin cruzar
+límites de banco:
+
+| Banco | Bytes de caché |
+| --- | ---: |
+| 3 | 16.384 |
+| 4 | 16.352 |
+| 6 | 16.048 |
+
+Los 113 tamaños necesitarían **95.113 bytes solo en píxeles empaquetados**,
+antes de cabeceras y alineación. No caben en un banco de 16 KiB ni junto
+a todas las tablas y buffers de esta organización. El paso de dos píxeles
+es el compromiso de esta prueba.
+
+Como solo hay una ventana paginable en `0xC000`, no podemos acceder allí
+a un banco de caché y al banco 7 simultáneamente. Se copia la imagen a un
+buffer común de **2.064 bytes**, se pagina el banco 7 y se escribe la
+pantalla oculta. Se usan bloques de `LDI` desenrollados y avance directo
+entre filas del bitmap del Spectrum, sin recalcular cada dirección.
+
+Se recuerda el tamaño anterior por separado para cada pantalla. Al crecer,
+la imagen opaca sobrescribe el rectángulo antiguo. Al reducir, se borran
+solo las franjas que quedan fuera del nuevo rectángulo; el relleno interior
+se sobrescribe. Así se evita borrar 128×128 en cada cuadro.
+
+La caché depende del contenido del sprite: cambiarlo exige prepararla de
+nuevo. Los planes geométricos se reutilizan. La copia y el borrado incluyen
+automodificación de operandos y tampoco son reentrantes.
+
+Medidas de CPU para la animación completa con buffers alternos, incluyendo
+copia al buffer común, paginación, copia a pantalla y borrado de franjas:
+
+| Tamaño | Tiempo real anterior | Caché al crecer | Caché al reducir |
+| --- | ---: | ---: | ---: |
+| 16×16 | 31,71 ms | 1,37 ms | 3,38 ms |
+| 32×32 | 50,44 ms | 2,94 ms | 6,31 ms |
+| 48×48 | 81,43 ms | 5,10 ms | 9,83 ms |
+| 64×64 | 95,57 ms | 7,84 ms | 13,91 ms |
+| 96×96 | 137,17 ms | 15,09 ms | 23,88 ms |
+| 128×128 | 129,07 ms | 24,70 ms | — |
+
+No hay reducción desde un tamaño superior a 128. El peor caso de toda la
+secuencia medida ocurre al reducir a 112×112: **29,75 ms**. La preparación
+inicial cuesta **22.361.290 T-states, 6,30 s ideales**, una vez.
+Estos tiempos excluyen contención, interrupciones, espera HALT y el resto
+del bucle de animación; **no son FPS medidos en un Spectrum completo**.
+La caché no garantiza 50 dibujos/s en todo el rango.
+
+La demo trabaja con un sprite opaco, centrado, sin máscara ni recorte y
+sobre fondo negro. La caché incorpora el desplazamiento de bits de ese
+centrado: otra posición horizontal requiere desplazar bytes o preparar
+otras alineaciones. El borrado de franjas está diseñado para esta animación
+centrada, sin gestión de varios objetos. Almacenar el resultado no mejora
+los escalones y aliasing del vecino más próximo.
+
 ## Sincronización y doble pantalla
+
+Este protocolo se aplica a las dos variantes.
 
 Sincronizar únicamente el comienzo del dibujo con `HALT` no basta: un
 dibujo grande tarda varios cuadros de vídeo. El nuevo cuadro se prepara
@@ -94,6 +183,8 @@ Ambas pantallas se inicializan, incluidos sus atributos. El borde permanece
 negro para que las marcas de perfilado no produzcan destellos.
 
 ## Medidas y límites
+
+Las medidas siguientes corresponden a la variante en tiempo real.
 
 T-states medidos en emulación de **CPU Z80**, a 3.546.900 Hz. La suma incluye
 borrado de una región de 128×128, selección/copia del plan, paginación de
@@ -150,6 +241,14 @@ pantalla visible durante el dibujo. Se inyectan interrupciones durante el
 renderizado, se comprueba que no muestran un cuadro incompleto y que cada
 intercambio muestra el bitmap esperado. Esto valida el protocolo en la
 emulación de CPU, sin modelar la ULA ni la contención del Spectrum.
+
+`tools/verify_cached.py` comprueba **456 imágenes generadas por el Z80**
+(57 tamaños y ocho sprites), **1.808 copias** en ambas pantallas y
+**113 intercambios** arrancando desde el snapshot. Compara con la misma
+referencia independiente, verifica relleno y límites de banco, preservación
+de planes/caché, ausencia de restos al reducir, atributos y pantalla exterior.
+Un breakpoint hace fallar las pruebas si la animación vuelve a llamar al
+escalador. Mantiene las comprobaciones de pantalla visible e interrupciones.
 
 La cinta se comprueba por estructura, checksums y contenido de los bloques;
 eso **no valida** la reproducción de cinta ni su carga por la ROM.
