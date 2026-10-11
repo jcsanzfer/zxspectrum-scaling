@@ -9,28 +9,29 @@ entry:
     xor a
     out ($fe),a
     ld hl,$4000
-    ld de,$4001
-    ld bc,6143
-    ld (hl),a
-    ldir
-    ld hl,$5800
-    ld de,$5801
-    ld bc,767
-    ld (hl),7                 ; white ink, black paper
-    ldir
+    call initialize_screen
+    ld a,23                   ; ROM 48K, screen 5 visible, RAM bank 7 paged
+    ld bc,$7ffd
+    out (c),a
+    ld hl,$c000
+    call initialize_screen
     ei
 frame:
-    ld a,2
-    out ($fe),a               ; red: clear + table selection
-    call clear_box
     call select_plan
-    ld a,4
-    out ($fe),a               ; green: resample + draw
+    call select_draw_screen
+    call clear_box
     call render
 frame_done:
-    xor a
-    out ($fe),a
+    di                        ; EI/HALT below avoids a flip-before-HALT race
+    ld a,1
+    ld (flip_pending),a
+    ei
+wait_flip:
     halt
+flip_complete:
+    ld a,(flip_pending)
+    or a
+    jr nz,wait_flip
     ld a,(size)
     ld b,a
     ld a,(direction)
@@ -45,6 +46,39 @@ reverse:
     neg
     ld (direction),a
     jr frame
+
+; Initialize bitmap and attributes of the screen at HL ($4000 or $c000).
+initialize_screen:
+    xor a
+    ld d,h
+    ld e,l
+    inc de
+    ld bc,6143
+    ld (hl),a
+    ldir
+    inc hl
+    ld d,h
+    ld e,l
+    inc de
+    ld bc,767
+    ld (hl),7                 ; white ink, black paper
+    ldir
+    ret
+
+; Bank 7 stays at $c000 while drawing. Only the hidden screen is modified.
+select_draw_screen:
+    ld a,(visible_screen)
+    or 23
+    ld bc,$7ffd
+    out (c),a
+    ld a,(visible_screen)
+    or a
+    ld a,$c0
+    jr z,draw_base_ready
+    ld a,$40
+draw_base_ready:
+    ld (screen_base),a
+    ret
 
 ; Clear the fixed 128x128 footprint, not the full screen.
 clear_box:
@@ -70,7 +104,9 @@ screen_addr:
     push af
     ld l,a
     and 7
-    or $40
+    ld h,a
+    ld a,(screen_base)
+    or h
     ld h,a
     ld a,l
     and $38
@@ -100,7 +136,10 @@ select_plan:
     ld de,directory
     add hl,de
     ld a,(hl)
+    ld b,a
+    ld a,(visible_screen)
     or 16
+    or b
     ld bc,$7ffd
     out (c),a
     inc hl
@@ -231,6 +270,9 @@ copy_row:
     ret
 
 size:           db 16
+visible_screen: db 0           ; bit 3 of $7ffd, mirrored across ALL paging
+screen_base:    db $c0
+flip_pending:   db 0
 direction:      db 1
 width:          db 0
 x_byte:         db 0
@@ -246,11 +288,29 @@ directory:     INCBIN "build/directory.bin"
 sprite:        INCBIN "build/sprite.bin"
     ALIGN 256
 plan:          ds 1024
-    ASSERT $ < $be00
-    ORG $be00
-    ds 257,$bf                ; any ULA interrupt vector -> $bfbf
-    ORG $bfbf
+    ASSERT $ < $bdbd
+    ORG $bdbd
 interrupt:
+    push af
+    push bc
+    ld a,(flip_pending)
+    or a
+    jr z,no_flip
+    xor a
+    ld (flip_pending),a
+    ld a,(visible_screen)
+    xor 8
+    ld (visible_screen),a
+    or 23
+    ld bc,$7ffd
+    out (c),a                 ; flip immediately after vertical interrupt
+no_flip:
+    pop bc
+    pop af
     ei
     reti
-    SAVEBIN "build/main.bin",$8000,$bfc2-$8000
+interrupt_end:
+    ASSERT $ < $be00
+    ORG $be00
+    ds 257,$bd                ; any ULA interrupt vector -> $bdbd
+    SAVEBIN "build/main.bin",$8000,$bf01-$8000
